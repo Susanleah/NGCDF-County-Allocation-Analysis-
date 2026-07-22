@@ -1,0 +1,1364 @@
+---
+title: "NGCDF County Allocation Analysis"
+subtitle: "Rift Valley (Group A) & Central (Group B) Counties 2014 to 2030"
+
+author:
+  - "Stephen Nzambu Ndundu"
+  - "SDS6/49567/2025"
+  - "Susan Leah Wangari"
+  - "SDS6/49245/2025"
+  - "Contribution: 50:50"
+
+date: "12 February 2026"
+
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    fig-pos: "H"
+    colorlinks: true
+    title-page: true
+
+bibliography: references.bib
+csl: https://www.zotero.org/styles/apa
+
+execute:
+  warning: false
+  message: false
+---
+
+\newpage
+
+<center>
+
+# NGCDF County Allocation Analysis
+
+## Rift Valley (Group A) & Central (Group B) Counties  
+## 2014 to 2030
+
+<br><br>
+
+### Prepared by
+
+**Stephen Nzambu Ndundu**  
+SDS6/49567/2025  
+
+and  
+
+**Susan Leah Wangari**  
+SDS6/49245/2025  
+
+<br>
+
+### Contribution
+
+50:50
+
+<br><br>
+
+### Date
+
+12 February 2026
+
+</center>
+
+\newpage
+
+```{r setup}
+#| include: false
+# ============================================================================
+# SETUP CHUNK — RECONSTRUCTED
+# This chunk was not echoed in the rendered PDF, so it has been rebuilt from
+# (a) the Methodology section of the report and (b) how objects are used in
+# the visible chunks. Review the data path, column names and colour palette
+# against your original data before rendering.
+# ============================================================================
+library(tidyverse)
+library(scales)
+library(patchwork)
+library(ineq)
+library(knitr)
+library(kableExtra)
+library(janitor)
+library(readr)
+library(here)
+
+theme_set(theme_minimal(base_size = 11))
+
+# ---- Constants -------------------------------------------------------------
+YEARS   <- as.character(2014:2026)
+GROUP_A <- c("Trans Nzoia", "Nandi", "Uasin Gishu")
+GROUP_B <- c("Murang'a", "Kiambu", "Kirinyaga")
+
+NEIGHBOURS_A <- c("Elgeyo-Marakwet", "Baringo", "Kakamega", "West Pokot", "Nyandarua")
+NEIGHBOURS_B <- c("Nyandarua", "Embu", "Machakos", "Nairobi City", "Nyeri")
+
+# Colour palette (reconstructed from chart colours in the rendered PDF)
+COL <- c(
+  "Nandi"           = "#f59e0b",  # orange
+  "Trans Nzoia"     = "#10b981",  # teal green
+  "Uasin Gishu"     = "#3b82f6",  # blue
+  "Kiambu"          = "#f43f5e",  # rose red
+  "Kirinyaga"       = "#6366f1",  # indigo
+  "Murang'a"        = "#10b981",  # green
+  # neighbours
+  "Elgeyo-Marakwet" = "#a78bfa",
+  "Baringo"         = "#ec4899",
+  "Kakamega"        = "#fb923c",
+  "West Pokot"      = "#67e8f9",
+  "Nyandarua"       = "#bef264",
+  "Embu"            = "#f9a8d4",
+  "Machakos"        = "#fdba74",
+  "Nairobi City"    = "#94a3b8",
+  "Nyeri"           = "#a3e635"
+)
+
+# CPI deflator series (2014 = 100) — values from Table 16 of the report -
+CPI_DF <- tibble(
+  year = 2014:2026,
+  cpi  = c(100, 106, 111, 118, 126, 131, 138, 148, 162, 177, 189, 198, 208))
+
+# Load and clean raw data (see Methodology 5.1.1)
+# Expected wide layout: county | constituency | voters | 2014 ... 2026
+#
+# Reproducibility note: the data file is expected in the SAME FOLDER as this
+# .qmd file. Quarto sets the working directory to the document's own folder
+# by default when rendering, so a plain relative filename works on any
+# machine, OS, or user account without any setwd() or absolute path.
+data_path <- "NEW_NGCDF_DATA_28-JAN_2026.csv"
+
+if (!file.exists(data_path)) {
+  stop(
+    "Data file not found at: ", data_path, "\n",
+    "Make sure 'NEW_NGCDF_DATA_28-JAN_2026.csv' is in the same folder as this .qmd file, ",
+    "and render with Quarto (not by sourcing the R code from a different working directory)."
+  )
+}
+
+raw <- read_csv(
+  data_path,
+  show_col_types = FALSE) %>%
+  clean_names()
+
+# Year columns expected in the analysis
+YEARS <- as.character(2014:2025)
+
+# Clean and prepare data
+df_all <- raw %>%
+  rename_with(~ str_remove(.x, "^x")) %>%   # x2014 -> 2014
+  mutate(
+    county = str_replace(
+      county,
+      regex("^murang.?a$", ignore_case = TRUE),
+      "Murang'a")) %>%
+  filter(!is.na(county), !is.na(constituency)) %>%
+  mutate(
+    across(
+      c(voters, all_of(YEARS)),
+      ~ suppressWarnings(as.numeric(.x))))
+# Group A subset
+df_A <- df_all %>%
+  filter(county %in% GROUP_A)
+df_B <- df_all %>% filter(county %in% GROUP_B)
+# Long format and county-year aggregates
+long_all <- df_all %>%
+  pivot_longer(all_of(YEARS), names_to = "year", values_to = "alloc") %>%
+  mutate(year = as.integer(year))
+make_cy <- function(counties) {
+  long_all %>%
+    filter(county %in% counties, !is.na(alloc)) %>%
+    group_by(county, year) %>%
+    summarise(total = sum(alloc), voters = sum(voters), .groups = "drop") %>%
+    left_join(CPI_DF, by = "year") %>%
+    mutate(
+      real_total = total / (cpi / 100),
+      per_voter  = total / voters)}
+cy_A <- make_cy(GROUP_A)
+cy_B <- make_cy(GROUP_B)
+cy_6 <- bind_rows(cy_A, cy_B)
+
+# Linear forecasts 2027–2030 (OLS on 2020–2026, Methodology 5.3)
+make_fc <- function(cy) {
+  cy %>%
+    filter(year >= 2020) %>%
+    group_by(county) %>%
+    group_modify(~ {
+      m <- lm(total ~ year, data = .x)
+      tibble(year  = 2027:2030,
+             total = predict(m, newdata = tibble(year = 2027:2030)))}) %>%
+    ungroup() %>%
+    mutate(type = "Forecast")}
+fc_A <- make_fc(cy_A)
+fc_B <- make_fc(cy_B)
+# Equity metrics: Gini, CV, max/min ratio (Methodology 5.4)
+make_gini <- function(counties) {
+  long_all %>%
+    filter(county %in% counties, !is.na(alloc)) %>%
+    group_by(county, year) %>%
+    summarise(
+      gini          = ineq::Gini(alloc),
+      cv            = sd(alloc) / mean(alloc) * 100,
+      max_min_ratio = max(alloc) / min(alloc),
+      .groups = "drop")}
+gini_A <- make_gini(GROUP_A)
+gini_B <- make_gini(GROUP_B)
+
+# Constituency tiers for 2025 (intra-county tertiles)
+make_tier <- function(df) {
+  df %>%
+    filter(!is.na(`2025`)) %>%
+    group_by(county) %>%
+    mutate(
+      tier = {
+        brks <- quantile(`2025`,
+                         probs = c(0, 1/3, 2/3, 1),
+                         na.rm = TRUE)
+        if (length(unique(brks)) < 4) {
+          factor("Mid", levels = c("High", "Mid", "Low"))
+        } else {
+          cut(`2025`,
+              breaks = brks,
+              labels = c("Low", "Mid", "High"),
+              include.lowest = TRUE)}},
+      vs_mean = (`2025` / mean(`2025`, na.rm = TRUE) - 1) * 100,
+      per_voter = `2025` / voters
+    ) %>%
+    ungroup() %>%
+    mutate(tier = factor(tier, levels = c("High", "Mid", "Low")))}
+tier_A <- make_tier(df_A)
+tier_B <- make_tier(df_B)
+
+# National ranking, all 47 counties (2025)
+make_rank <- function(targets) {
+  df_all %>%
+    filter(!is.na(`2025`)) %>%
+    group_by(county) %>%
+    summarise(total_2025 = sum(`2025`),
+              n_const    = n(),
+              .groups = "drop") %>%
+    mutate(avg_per_const = total_2025 / n_const) %>%
+    arrange(desc(total_2025)) %>%
+    mutate(rank      = row_number(),
+           is_target = county %in% targets)}
+rank_A <- make_rank(GROUP_A)
+rank_B <- make_rank(GROUP_B)
+```
+
+# Executive Summary {.unnumbered}
+
+This report presents a comprehensive analysis of National Government Constituency Development Fund (NGCDF) allocations for six Kenyan counties spanning 2014 to 2026, with linear projections through 2030. The counties are organised into two regional groups:
+
+- **Group A: Rift Valley:** Trans Nzoia, Nandi, and Uasin Gishu
+- **Group B: Central:** Murang'a, Kiambu, and Kirinyaga
+
+The analysis covers nominal and CPI-adjusted allocation trends, intra-county equity (Gini coefficients), per-voter funding levels, constituency performance tiers, national rankings, and comparisons with neighboring counties. Statistical tests assess differences across constituencies within each county group.
+
+**Key findings at a glance:**
+
+- All six counties have recorded consistent nominal growth in NGCDF allocations since 2014, reflecting Kenya's expanding national budget and progressive scaling of constituency development funding.
+- When adjusted for inflation (CPI-deflated to 2014 prices), real growth is substantially more modest across all counties, a reminder that headline allocation increases do not always translate to equivalent gains in purchasing power.
+- Intra-county allocation equity, as measured by the Gini coefficient, varies across counties and over time. Some counties have improved distributional fairness while others show signs of widening disparities between constituencies.
+- Per-voter allocation analysis reveals important differences in how effectively each county's registered voter base is served, offering a more equitable basis for comparison than absolute totals alone.
+- National ranking positions the six study counties within the broader landscape of all 47 Kenyan counties, highlighting their relative standing in the national distribution of development funds.
+- Forecasts to 2030 project continued nominal growth, though actual allocations will depend on national fiscal decisions, revenue performance, and policy priorities.
+
+# Background and Context
+
+## About the NGCDF
+
+The **National Government Constituency Development Fund (NGCDF)** was established under the National Government Constituency Development Fund Act (Cap. 56 of the Laws of Kenya) [@ngcdfact2015] to channel a portion of national government revenues directly to parliamentary constituencies for grassroots-level development. Its core mandate is to reduce regional development disparities by ensuring that even the most remote and undeserved constituencies receive a predictable annual allocation for infrastructure, education, health, and community projects.
+
+Each of Kenya's 290 parliamentary constituencies receives an annual allocation, the size of which is primarily determined by the national revenue-sharing formula. Allocations are administered through Constituency Development Fund Committees (CDFCs) chaired by the local Member of Parliament, with oversight from the NGCDF Board. The fund has, over the years, become one of the most visible instruments of government development spending at the grassroots level, funding construction of classrooms, health centers, boreholes, roads, and bursary programs for secondary and tertiary students.
+
+## Study Counties
+
+This report analyses six counties grouped by geographic region:
+
+**Group A: Rift Valley Region** encompasses Trans Nzoia, Nandi, and Uasin Gishu. These are predominantly agricultural counties in the former Rift Valley Province, sharing borders and to some extent similar economic profiles anchored in maize farming, tea, and dairy. Eldoret, the regional hub city in Uasin Gishu, gives this cluster a notable urban center that influences economic activity across the broader region.
+
+**Group B: Central Region** comprises Murang'a, Kiambu, and Kirinyaga. These counties form part of the Mount Kenya foothill zone, with strong agricultural traditions in tea, coffee, and horticulture. Kiambu's proximity to Nairobi makes it particularly urbanized, with a mixed economy spanning agriculture, industry, and services, while Murang'a and Kirinyaga retain a more predominantly rural character.
+
+## Analytical Scope and Data
+
+This analysis draws on official NGCDF allocation data spanning financial years 2014 to 2026, sourced from the NGCDF Board [@ngcdf2025]. The data set covers all constituencies within the six study counties, with each record containing the annual allocation figure and the number of registered voters as reported by the Independent Electoral and Boundaries Commission (IEBC) [@iebc2022].
+
+The analysis integrates Kenya National Bureau of Statistics (KNBS) Consumer Price Index (CPI) data [@knbs2025] to enable inflation-adjusted comparisons, allowing us to distinguish genuine real-terms growth from increases that merely reflect the rising general price level. A **base year of 2014 (index = 100)** is used throughout, as it marks the beginning of the data series.
+
+::: {.callout-note}
+**Data note:** All monetary figures are in Kenya Shillings (KES). Nominal values refer to current-year prices; real values are CPI-adjusted to 2014 purchasing power. Forecasts for 2027 to 2030 are linear projections fitted on 2020 o 2026 data.
+:::
+
+# Group A: Rift Valley: Trans Nzoia, Nandi & Uasin Gishu
+
+The three Rift Valley counties in this group, Trans Nzoia, Nandi, and Uasin Gishu, collectively cover a significant portion of Kenya's western agricultural heartland. Trans Nzoia is famed for large-scale maize production and is often called Kenya's "bread basket." Nandi is characterized by its tea-growing highlands and is home to some of Kenya's most celebrated long-distance runners. Uasin Gishu, centered on Eldoret, the fifth largest city in Kenya, has a more diversified economy with significant manufacturing, educational institutions (including Moi University), and the country's second busiest international airport.
+
+Despite geographic proximity, the three counties differ in number of constituencies (Trans Nzoia has 5, Nandi has 6, and Uasin Gishu has 6), which means that headline county-level totals must be read alongside per-constituency and per-voter figures to avoid misleading comparisons.
+
+## Allocation Trends and Forecasts
+
+Understanding how NGCDF allocations have evolved over time is fundamental to assessing whether development funding has kept pace with population growth, inflation, and the expanding developmental needs of constituencies. The chart below plots the annual total allocation for each county from 2014 to 2026, followed by a linear projection to 2030.
+
+The trend line is fitted using Ordinary Least Squares (OLS) regression on the 2020–2026 sub-period, which was chosen deliberately to exclude the earlier slower-growth years and reflect the more recent trajectory of allocations. A vertical dashed line marks the boundary between observed actual and projected values, making it easy to distinguish the two.
+
+Key things to look for in this chart: Is one county's trajectory steeper (faster-growing) than others? Are there any noticeable breaks or plateaus in the trend, for instance, around 2020–2021, which corresponds to the COVID-19 pandemic period when national revenues were under pressure? How do the three counties compare in absolute terms, and what does that imply about the size of their respective constituency bases?
+
+```{r}
+#| label: fig-trend-a
+#| fig-cap: "Group A: Annual NGCDF county totals (actuals 2014–2026) and linear forecast 2027–2030. Dashed lines indicate projected values."
+trend_A <- cy_A %>% select(county, year, total) %>% mutate(type = "Actual") %>% bind_rows(fc_A)
+ggplot(trend_A, aes(x = year, y = total / 1e9,
+                    colour = county,
+                    linetype = type,
+                    group = interaction(county, type))) +
+  geom_vline(xintercept = 2026.5, colour = "#94a3b8", linetype = "dashed", linewidth = 0.6) +
+  geom_line(linewidth = 1.5) +
+  geom_point(data = ~ filter(.x, type == "Actual"),
+             size = 2.5, shape = 21, fill = "white", stroke = 2) +
+  geom_point(data = ~ filter(.x, type == "Forecast"),
+             size = 3, shape = 17) +
+  annotate("text", x = 2027.3, y = max(trend_A$total / 1e9) * 0.55,
+           label = "Forecast →", colour = "#6366f1", size = 3.2, fontface = "italic") +
+  scale_colour_manual(values = COL) +
+  scale_linetype_manual(values = c("Actual" = "solid", "Forecast" = "dashed")) +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026, 2027, 2030)) +
+  scale_y_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(
+    title    = "Group A: NGCDF County Totals Actuals + Forecast 2027–2030",
+    subtitle = "Linear trend fitted on 2020–2026 trajectory",
+    x = NULL, y = "Total (KES Billion)", colour = NULL, linetype = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+```
+
+```{r}
+#| label: tbl-fc-a
+#| tbl-cap: "Group A — Projected NGCDF allocations 2027–2030 (KES, rounded)"
+fc_A %>%
+  mutate(total = round(total)) %>%
+  pivot_wider(names_from = county, values_from = total, id_cols = year) %>%
+  rename(Year = year) %>%
+  mutate(across(-Year, ~ format(.x, big.mark = ","))) %>%
+  kbl(align = c("l", rep("r", 3))) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  add_header_above(c(" " = 1, "Projected Allocation (KES)" = 3))
+```
+
+The forecast table above translates the graphical projections into precise figures. These numbers should be interpreted as the expected allocation **if current trends continue uninterrupted** they are not guarantees, and significant national budget shifts, changes in the NGCDF formula, or economic shocks could cause actual allocations to deviate materially from these projections. The figures are most useful as planning benchmarks: county governments and constituencies can use them to estimate future resource envelopes for multi-year development planning.
+
+## Cumulative Allocation
+
+While annual figures show year-to-year fluctuations, **cumulative allocation** provides a more complete picture of the total development investment that a county has received (or is projected to receive) over the entire period. A county that received lower allocations in early years but has been growing faster may ultimately accumulate more resources than a county that started higher but grew more slowly.
+
+The area chart below shows the running cumulative total for each county from 2014 through to the 2030 projection horizon. The shaded area under each county's curve (for the actual period) helps visually communicate the total volume of funds. The dashed lines extending beyond 2026 represent the projected cumulative growth based on the linear forecast.
+
+```{r}
+#| label: fig-cumul-a
+#| fig-cap: "Group A: Cumulative NGCDF allocation 2014–2030 (including projections)."
+trend_A %>% arrange(county, year) %>% group_by(county) %>%
+  mutate(cumul = cumsum(total)) %>% ungroup() %>%
+  ggplot(aes(x = year, y = cumul / 1e9,
+             fill = county, colour = county,
+             linetype = type,
+             group = interaction(county, type))) +
+  geom_area(data = ~ filter(.x, type == "Actual"), alpha = 0.15, position = "identity") +
+  geom_line(linewidth = 1.4) +
+  scale_colour_manual(values = COL) +
+  scale_fill_manual(values = COL) +
+  scale_linetype_manual(values = c("Actual" = "solid", "Forecast" = "dashed")) +
+  scale_x_continuous(breaks = c(2014, 2018, 2022, 2026, 2030)) +
+  scale_y_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(
+    title    = "Group A: Cumulative NGCDF Allocation 2014–2030",
+    subtitle = "Running total per county, including projected years",
+    x = NULL, y = "Cumulative (KES Billion)", colour = NULL, linetype = NULL) + theme(legend.position = "top")
+```
+
+## Constituency Performance Tiers (2025)
+
+Not all constituencies within a county receive the same NGCDF allocation. While the fund's formula is designed to be broadly equitable, differences in constituency size, number of registered voters, and historical patterns can result in some constituencies receiving meaningfully more than others within the same county.
+
+To make these differences visible, each constituency is classified into one of three performance tiers based on where its 2025 allocation falls within the county's own distribution:
+
+- **High tier** (green): Allocations in the top third of the county's distribution, these constituencies received relatively more funding compared to their county peers.
+- **Mid tier** (amber): Allocations in the middle third broadly average within the county.
+- **Low tier** (red): Allocations in the bottom third, these constituencies received comparatively less than the county average.
+
+This classification is entirely **relative and intra-county** a "Low" tier constituency in one county may still receive more in absolute terms than a "High" tier constituency in another county. The purpose is not to flag under performance in any absolute sense, but to highlight where within-county disparities exist and which constituencies may benefit most from targeted attention.
+
+The `vs County Mean (%)` column in the accompanying table shows how far above or below the county average each constituency sits, providing a precise measure of the distributional gap. The `Per Voter (KES)` column further contextualizes each constituency's allocation by expressing it per registered voter, which is arguably the most equitable metric of all since it normalizes for differences in constituency population size.
+
+Constituencies are classified into **High**, **Mid**, and **Low** tiers based on intra-county tertiles of the 2025 allocation.
+
+```{r}
+#| label: fig-tier-a
+#| fig-cap: "Group A: Constituency-level 2025 allocations colour-coded by performance tier (High / Mid / Low)."
+tier_A %>%
+  ggplot(aes(x = `2025` / 1e6, y = reorder(constituency, `2025`), fill = tier)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = tier), hjust = -0.2, size = 2.8, colour = "#475569") +
+  scale_fill_manual(values = c("High" = "#10b981", "Mid" = "#f59e0b", "Low" = "#ef4444")) +
+  scale_x_continuous(
+    labels = label_number(suffix = "M", prefix = "KES "),
+    expand = expansion(mult = c(0, 0.25))) + facet_wrap(~ county, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Group A: Constituency Performance Tiers 2025",
+    subtitle = "High = top third · Mid = middle third · Low = bottom third",
+    x = "Allocation (KES Millions)", y = NULL, fill = "Tier") + theme(legend.position = "top")
+```
+
+```{r}
+#| label: tbl-tier-a
+#| tbl-cap: "Group A — Constituency tier classification and per-voter allocation (2025)"
+tier_A %>%
+  select(County = county, Constituency = constituency,
+         Voters = voters, `Allocation (KES)` = `2025`,
+         Tier = tier, `vs County Mean (%)` = vs_mean,
+         `Per Voter (KES)` = per_voter) %>%
+  arrange(County, desc(Tier)) %>%
+  mutate(
+    `Allocation (KES)`   = format(round(`Allocation (KES)`), big.mark = ","),
+    `vs County Mean (%)` = round(`vs County Mean (%)`, 1),
+    `Per Voter (KES)`    = format(round(`Per Voter (KES)`), big.mark = ","),
+    Voters               = format(Voters, big.mark = ",")
+  ) %>%
+  kbl(align = c("l", "l", "r", "r", "c", "r", "r")) %>%
+  kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed"),
+                font_size = 11) %>%
+  column_spec(5, bold = TRUE,
+              color = ifelse(tier_A %>% arrange(county, desc(tier)) %>% pull(tier) == "High", "#10b981",
+                      ifelse(tier_A %>% arrange(county, desc(tier)) %>% pull(tier) == "Mid", "#f59e0b",
+                             "#ef4444"))) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+## Equity and Intra-County Distribution (Gini)
+
+While the tier analysis provides a snapshot of 2025 distribution, tracking equity over time reveals whether a county is becoming more or less equitable in how it distributes NGCDF funds across its constituencies. This section uses two complementary statistical measures:
+
+### Gini Coefficient
+
+The **Gini coefficient** is a well-established measure of inequality, most commonly used in economics to measure income distribution but equally applicable to any distributional question. It ranges from 0 (perfect equality, every constituency receives exactly the same allocation) to 1 (maximum inequality, one constituency receives everything and the rest receive nothing). In practice, NGCDF Gini coefficients will typically fall between 0.05 and 0.40.
+
+A rising Gini over time indicates that allocations within the county are becoming more concentrated among a smaller number of constituencies potentially a concern for equitable development. A declining Gini suggests convergence, with the gap between the best- and worst-funded constituencies narrowing.
+
+It is important to note that some degree of variation is expected and even justifiable constituencies with larger voter populations or greater infrastructure deficits may legitimately receive more. The Gini should therefore be interpreted as a **monitoring tool** rather than a verdict on the fund's fairness.
+
+### Coefficient of Variation (CV)
+
+The **Coefficient of Variation (CV)** expresses the standard deviation of constituency allocations as a percentage of the mean. Unlike the Gini, which focuses on the shape of the entire distribution, the CV is particularly sensitive to extreme values at the top and bottom. A high CV indicates that allocations are spread widely around the mean, while a low CV suggests they cluster tightly around it.
+
+Together, the Gini and CV provide a robust picture of distributional dynamics over time. If both are rising, it strongly suggests increasing inequality within the county. If they diverge, it may indicate a shift in the structure of inequality (e.g., more extreme outliers without a change in the middle of the distribution).
+
+```{r}
+#| label: fig-gini-a
+#| fig-cap: "Group A — Gini coefficient (top) and Coefficient of Variation (bottom) measuring intra-county allocation inequality, 2014–2026."
+pE1_A <- gini_A %>%
+  ggplot(aes(x = year, y = gini, colour = county, group = county)) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) + scale_x_continuous(breaks = 2014:2026) + scale_y_continuous(limits = c(0, NA)) + labs(
+    title    = "Group A: Intra-County Gini — 2014 to 2026",
+    subtitle = "0 = perfectly equal · Higher = more unequal",
+    x = NULL, y = "Gini Coefficient", colour = NULL) + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+pE2_A <- gini_A %>%
+  ggplot(aes(x = year, y = cv, colour = county, group = county)) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(breaks = 2014:2026) +
+  scale_y_continuous(labels = label_percent(scale = 1)) +
+  labs(
+    title = "Group A: Coefficient of Variation (CV)",
+    x = NULL, y = "CV (%)", colour = NULL) + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+pE1_A / pE2_A
+```
+
+```{r}
+#| label: tbl-gini-a
+#| tbl-cap: "Group A: Gini, CV, and max/min ratio for 2025"
+gini_A %>%
+  filter(year == 2025) %>%
+  mutate(
+    gini          = round(gini, 4),
+    cv            = round(cv, 2),
+    max_min_ratio = round(max_min_ratio, 3)) %>%
+  rename(County = county, Year = year,
+         `Gini Coefficient` = gini,
+         `CV (%)` = cv,
+         `Max/Min Ratio` = max_min_ratio) %>%
+  kbl(align = c("l", "c", "r", "r", "r")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+## CPI-Adjusted (Real) Allocations
+
+One of the most important, and often overlooked, aspects of public expenditure analysis is distinguishing between **nominal** and **real** changes in funding. A county that receives 20% more in 2025 than in 2014 in nominal terms has not necessarily received 20% more in terms of what those funds can actually buy. If inflation over the same period was, say, 77% (as has been the case in Kenya from 2014 to 2025), then a 20% nominal increase actually represents a significant decline in real purchasing power.
+
+This distinction matters enormously for development planning. If a constituency's allocation has grown by KES 5 million since 2014 but construction costs, materials, and labor have all risen by over 70%, the constituency may find that its 2025 allocation builds far fewer classrooms or boreholes than the same nominal amount would have in 2014.
+
+### How the Adjustment Works
+
+This report uses Kenya's **Consumer Price Index (CPI)** to deflate nominal allocations into constant 2014 prices. The formula applied is:
+
+$$
+\text{Real Allocation}_t = \frac{\text{Nominal Allocation}_t}{\text{CPI}_t / 100}
+$$
+
+Where CPI is expressed with 2014 = 100. This produces a figure in 2014 purchasing power, allowing consistent comparisons across time.
+
+### Index Chart Interpretation
+
+The chart below presents allocations as an **index (2014 = 100)** for both nominal and real terms. When a county's real index line is significantly below its nominal line, inflation has eroded a large share of the apparent funding gains. The dotted horizontal line at 100 represents the 2014 baseline, any county whose real index falls below this line has, in real terms, received less than it did at the start of the series.
+
+```{r}
+#| label: fig-cpi-a
+#| fig-cap: "Group A: Nominal vs CPI-adjusted (real) allocation index, 2014 = 100. Dashed lines represent purchasing-power-adjusted values."
+cpi_A <- cy_A %>%
+  select(county, year, total, real_total) %>%
+  mutate(
+    nominal_idx = total      / total[year == 2014]      * 100,
+    real_idx    = real_total / real_total[year == 2014] * 100,
+    .by = county)
+cpi_A %>%
+  pivot_longer(c(nominal_idx, real_idx), names_to = "type", values_to = "idx") %>%
+  mutate(type = recode(type,
+    "nominal_idx" = "Nominal (current KES)",
+    "real_idx"    = "Real (2014 KES)")) %>%
+  ggplot(aes(x = year, y = idx, colour = county, linetype = type)) +
+  geom_hline(yintercept = 100, colour = "#94a3b8", linetype = "dotted") +
+  geom_line(linewidth = 1.4) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = COL) +
+  scale_linetype_manual(values = c("Nominal (current KES)" = "solid", "Real (2014 KES)" = "dashed")) +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026)) +
+  facet_wrap(~ county, ncol = 3) +
+  labs(
+    title    = "Group A: Nominal vs CPI-Adjusted Allocation Index",
+    subtitle = "Base 2014 = 100",
+    x = NULL, y = "Index (2014 = 100)", colour = NULL, linetype = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+```
+
+```{r}
+#| label: tbl-cpi-a
+#| tbl-cap: "Group A: Nominal vs real (2014 KES) allocation comparison for 2025"
+cpi_growth <- (CPI_DF$cpi[CPI_DF$year == 2025] / CPI_DF$cpi[CPI_DF$year == 2014] - 1) * 100
+cy_A %>%
+  filter(year == 2025) %>%
+  select(county, nominal = total, real = real_total) %>%
+  mutate(
+    pct_difference = round((nominal / real - 1) * 100, 1),
+    nominal_growth = round((nominal /
+      (cy_A %>% filter(year == 2014) %>%
+         filter(county %in% GROUP_A) %>%
+         select(county, total_2014 = total) %>%
+         right_join(tibble(county = GROUP_A), by = "county") %>%
+         pull(total_2014)) - 1) * 100, 1),
+    across(c(nominal, real), ~ format(round(.x), big.mark = ","))) %>%
+  rename(County = county,
+         `Nominal (KES)` = nominal,
+         `Real 2014 KES` = real,
+         `Inflation Gap (%)` = pct_difference) %>%
+  select(County, `Nominal (KES)`, `Real 2014 KES`, `Inflation Gap (%)`) %>%
+  kbl(align = c("l", "r", "r", "r")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  footnote(general = paste0("Kenya CPI growth 2014–2025: ", round(cpi_growth, 1), "%"))
+```
+
+## Per-Voter Allocation and Voter Context
+
+Comparing absolute allocation totals between constituencies can be misleading when their population sizes differ substantially. A constituency with 100,000 registered voters receiving KES 80 million may actually be less well funded than one with 40,000 voters receiving KES 50 million because in the former case the allocation per voter is only KES 800, while in the latter it is KES 1,250.
+
+**Per-voter allocation** the total constituency NGCDF allocation divided by the number of registered voters — corrects for this by providing a population-normalized measure of funding intensity. It is arguably the most equitable metric in this analysis, asking: how much development funding is each voter's constituency receiving on their behalf?
+
+### What the Charts Show
+
+The **upper panel** tracks how per-voter allocation has evolved over time at the county level. A rising trend indicates that funding growth has outpaced voter registration growth, a positive sign for development equity. A flat or declining trend may mean that voter rolls are expanding faster than allocations, effectively diluting the per-voter resource envelope even if nominal totals are rising.
+
+The **lower panel** maps individual constituencies by their 2025 allocation (y-axis) against the number of registered voters (x-axis), with each point labelled by constituency name. The fitted regression line shows the overall relationship. Constituencies falling significantly above the line are receiving more than expected for their voter count; those below receive less.
+
+```{r}
+#| label: fig-voter-a
+#| fig-cap: "Group A — Per-registered-voter allocation trends (top) and scatter of 2025 allocation vs voter population by constituency (bottom)."
+pV1_A <- cy_A %>%
+  ggplot(aes(x = year, y = per_voter, colour = county, group = county)) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(breaks = 2014:2026) +
+  scale_y_continuous(labels = label_number(big.mark = ",", prefix = "KES ")) +
+  labs(
+    title = "Group A: Allocation Per Registered Voter 2014 to 2026",
+    x = NULL, y = "KES per Voter", colour = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+pV2_A <- df_A %>%
+  filter(!is.na(`2025`), !is.na(voters), voters > 0) %>%
+  ggplot(aes(x = voters / 1000, y = `2025` / 1e6, colour = county, label = constituency)) +
+  geom_smooth(aes(group = 1), method = "lm", colour = "#64748b",
+              se = TRUE, fill = "#cbd5e1", alpha = 0.3, linewidth = 1) +
+  geom_point(size = 4, alpha = 0.85) +
+  geom_text(size = 2.8, colour = "#475569", vjust = -1, check_overlap = TRUE) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(labels = label_number(suffix = "K")) +
+  scale_y_continuous(labels = label_number(suffix = "M", prefix = "KES ")) +
+  labs(
+    title = "Group A: Allocation vs Voter Population — 2025",
+    x = "Registered Voters (Thousands)", y = "Allocation (KES Millions)", colour = NULL) + theme(legend.position = "top")
+pV1_A / pV2_A
+```
+
+## National Ranking (2025)
+
+Understanding how Group A counties compare to all 47 Kenyan counties provides vital context for interpreting their allocation levels. A county may appear to be receiving substantial funds in absolute terms, but if it ranks in the bottom quartile nationally, it is in fact among the less well-funded counties relative to its peers. Conversely, a county ranking highly may face greater scrutiny over whether its allocations are being deployed effectively.
+
+The national ranking presented here is based on the **total NGCDF allocation received across all constituencies within each county in 2025**. This means that counties with more constituencies (and therefore more MPs) will tend to rank higher simply by virtue of having more funding streams. To account for this, the ranking table also shows the **average per-constituency allocation**, which enables a fairer comparison of how generously each county's constituencies are funded on average.
+
+The bar chart ranks all 47 counties from bottom to top by 2025 allocation, with Group A counties highlighted in their distinct colors. This makes it immediately clear whether these counties are clustered near the top, middle, or bottom of the national distribution. Counties that are geographically adjacent or economically comparable to the study counties provide useful benchmarks.
+
+```{r}
+#| label: fig-rank-a
+#| fig-cap: "Group A: All 47 counties ranked by 2025 NGCDF allocation; Group A counties highlighted."
+#| fig-height: 9
+rank_A %>%
+  mutate(
+    county    = fct_reorder(county, total_2025),
+    highlight = if_else(county %in% GROUP_A, as.character(county), "Other")) %>%
+  ggplot(aes(x = total_2025 / 1e9, y = county, fill = highlight, alpha = highlight)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = c(COL[GROUP_A], Other = "#cbd5e1")) +
+  scale_alpha_manual(values = c(setNames(rep(1, 3), GROUP_A), Other = 0.5)) +
+  scale_x_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(
+    title    = "Group A: All 47 Counties — 2025 NGCDF Ranking",
+    subtitle = "Group A counties highlighted",
+    x = "Total Allocation (KES Billion)", y = NULL) +
+  guides(fill = guide_legend(title = NULL), alpha = "none") +
+  theme(legend.position = "top", axis.text.y = element_text(size = 8.5))
+```
+
+```{r}
+#| label: tbl-rank-a
+#| tbl-cap: "Group A — National ranking positions for Trans Nzoia, Nandi, and Uasin Gishu (2025)"
+rank_A %>%
+  filter(is_target) %>%
+  select(
+    County = county, Rank = rank,
+    `Total 2025 (KES)` = total_2025,
+    `No. Constituencies` = n_const,
+    `Avg per Const. (KES)` = avg_per_const) %>%
+  mutate(
+    `Total 2025 (KES)`     = format(round(`Total 2025 (KES)`), big.mark = ","),
+    `Avg per Const. (KES)` = format(round(`Avg per Const. (KES)`), big.mark = ",")) %>%
+  kbl(align = c("l", "c", "r", "c", "r")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+## Comparison with Neighboring Counties
+
+Peer comparison with geographically proximate counties is a powerful analytical tool. Counties that share similar demographic profiles, economic structures, and infrastructure conditions should, in theory, receive broadly comparable NGCDF allocations. Where significant differences exist, it raises questions worth examining: Are the disparities driven by differences in the number of constituencies? By different voter registration rates? Or by structural factors in the allocation formula?
+
+For Group A, the selected neighboring counties are: **Elgeyo-Marakwet, Baringo, Kakamega, West Pokot, and Nyandarua**. These counties share borders or are part of the broader Rift Valley and Western corridor. Including them provides a regional lens on whether Trans Nzoia, Nandi, and Uasin Gishu are receiving more, less, or roughly comparable funding relative to their neighbors.
+
+### Reading the Comparison Charts
+
+The **left panel** is a snapshot of 2025 allocations, ranking all counties in the peer group from lowest to highest. Target (Group A) counties are shown at full opacity; neighboring counties appear slightly faded. Exact allocation values are labelled at the end of each bar.
+
+The **right panel** shows trends from 2014 to 2026. Target counties are drawn with thick solid lines; neighbors use thinner dashed lines. This makes it straightforward to track whether Group A counties have been consistently above, below, or crossing the trajectories of their neighbors over time. A county that was once below a neighbor but has since overtaken it signals a shift in relative resource allocation — one worth understanding in policy terms.
+
+```{r}
+#| label: fig-neighbours-a
+#| fig-cap: "Group A — 2025 allocations (left) and allocation trends 2014–2026 (right) for target and neighbouring counties."
+SHOW_A <- c(GROUP_A, NEIGHBOURS_A)
+
+nb_yr_A <- df_all %>%
+  filter(county %in% SHOW_A) %>%
+  pivot_longer(all_of(YEARS), names_to = "year", values_to = "alloc") %>%
+  mutate(year = as.integer(year)) %>% filter(!is.na(alloc)) %>% group_by(county, year) %>%
+  summarise(total = sum(alloc), n = n(), .groups = "drop")
+pN1_A <- nb_yr_A %>%
+  filter(year == 2025) %>%
+  arrange(desc(total)) %>%
+  mutate(county = fct_inorder(county),
+         type   = ifelse(county %in% GROUP_A, "Target", "Neighbour")) %>%
+  ggplot(aes(x = total / 1e9, y = county, fill = county, alpha = type)) +
+  geom_col(width = 0.75, show.legend = FALSE) +
+  geom_text(aes(label = paste0(round(total / 1e9, 2), "B")),
+            hjust = -0.15, size = 3, colour = "#475569") +
+  scale_fill_manual(values = COL) +
+  scale_alpha_manual(values = c("Target" = 1, "Neighbour" = 0.55)) +
+  scale_x_continuous(
+    labels = label_number(suffix = "B", prefix = "KES "),
+    expand = expansion(mult = c(0, 0.25))) +
+  labs(title = "2025 Allocation: Target vs Neighbours",
+       x = "Total (KES Billion)", y = NULL)
+pN2_A <- nb_yr_A %>%
+  mutate(type = ifelse(county %in% GROUP_A, "Target", "Neighbour")) %>%
+  ggplot(aes(x = year, y = total / 1e9, colour = county, group = county,
+             linewidth = type, linetype = type)) +
+  geom_line() + geom_point(data = ~ filter(.x, type == "Target"), size = 2.5) +
+  scale_colour_manual(values = COL) +
+  scale_linewidth_manual(values = c("Target" = 2, "Neighbour" = 1), guide = "none") +
+  scale_linetype_manual(values = c("Target" = "solid", "Neighbour" = "dashed"), guide = "none") +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026)) +
+  scale_y_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(title = "Allocation Trends — Target + Neighbours",
+       x = NULL, y = "Total (KES Billion)", colour = NULL) +
+  theme(legend.position = "top")
+pN1_A | pN2_A
+```
+
+## Statistical Tests
+
+The visual and descriptive analysis above tells a compelling story, but statistical testing provides the rigor needed to distinguish genuine differences from random variation. This section presents three types of tests, each addressing a different analytical question.
+
+### ANOVA and Kruskal-Wallis: Are County Differences Real?
+
+The **one-way Analysis of Variance (ANOVA)** tests whether the mean 2025 constituency allocation differs significantly across the three counties within Group A. The null hypothesis is that all counties have the same mean — that any observed differences are due to chance. A statistically significant result (p < 0.05) means we can reject this and conclude that at least one county's constituencies receive systematically different allocations from the others.
+
+ANOVA assumes that residuals are approximately normally distributed and that variances are similar across groups. With the relatively small number of constituencies in each county, these assumptions may not always hold, so the **Kruskal-Wallis test** is also presented as a non-parametric alternative. It makes no assumption about the distribution of the data and tests whether the distributions of allocations differ across counties. If both tests agree, the findings are more robust.
+
+### Paired t-test: Has Funding Changed Year-on-Year?
+
+The **paired t-test (2024 vs 2025)** asks a more targeted question: did constituency allocations change significantly from one year to the next within each county? By treating the 2024 and 2025 allocations of the same constituency as a "pair", this test controls for constituency-level differences and focuses purely on whether there has been a systematic upward or downward shift in funding.
+
+A significant result (p < 0.05) indicates a genuine year-on-year change beyond what random variation would produce. The mean difference (positive or negative) tells us the average direction and magnitude of that change per constituency.
+
+### Pearson Correlation: Does Voter Count Predict Allocation?
+
+The **Pearson correlation coefficient (r)** measures the linear association between the number of registered voters and the 2025 NGCDF allocation at the constituency level. An r close to +1 means that constituencies with more voters tend to receive more funding which would be consistent with a population-weighted allocation formula. An r close to 0 means voter count is a weak predictor of allocation, suggesting other factors dominate. A negative r would be surprising and would warrant investigation.
+
+The strength of the correlation is classified as:
+
+| r          | Strength |
+|------------|----------|
+| 0.0 – 0.29 | Weak     |
+| 0.3 – 0.59 | Moderate |
+| 0.6 – 1.0  | Strong   |
+
+```{r}
+#| label: tbl-anova-a
+#| tbl-cap: "Group A: ANOVA and Kruskal-Wallis tests on 2025 constituency allocations"
+anova_df_A <- df_A %>% filter(!is.na(`2025`)) %>% mutate(county = factor(county))
+aov_A <- aov(`2025` ~ county, data = anova_df_A)
+kw_A  <- kruskal.test(`2025` ~ county, data = anova_df_A)
+
+aov_sum <- summary(aov_A)[[1]]
+
+tibble(
+  Test      = c("One-way ANOVA", "Kruskal-Wallis"),
+  Statistic = c(round(aov_sum$`F value`[1], 3), round(kw_A$statistic, 3)),
+  df        = c(paste0(aov_sum$Df[1], ", ", aov_sum$Df[2]), kw_A$parameter),
+  `p-value` = c(round(aov_sum$`Pr(>F)`[1], 4), round(kw_A$p.value, 4)),
+  Conclusion = c(
+    ifelse(aov_sum$`Pr(>F)`[1] < 0.05, "Significant difference", "No significant difference"),
+    ifelse(kw_A$p.value < 0.05, "Significant difference", "No significant difference")
+  )
+) %>%
+  kbl(align = c("l", "r", "c", "r", "l")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+```{r}
+#| label: tbl-ttest-a
+#| tbl-cap: "Group A: Paired t-tests: 2024 vs 2025 allocation per constituency"
+map_dfr(GROUP_A, function(co) {
+  sub <- df_A %>% filter(county == co, !is.na(`2024`), !is.na(`2025`))
+  tt  <- t.test(sub$`2025`, sub$`2024`, paired = TRUE)
+  tibble(
+    County            = co,
+    `t-statistic`     = round(tt$statistic, 3),
+    `Mean Diff (KES)` = format(round(tt$estimate), big.mark = ","),
+    `p-value`         = round(tt$p.value, 4),
+    Significance      = ifelse(tt$p.value < 0.05, "Significant ✓", "Not Significant"))}) %>%
+  kbl(align = c("l", "r", "r", "r", "l")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+```{r}
+#| label: tbl-corr-a
+#| tbl-cap: "Group A: Pearson correlation between registered voters and 2025 allocation"
+map_dfr(GROUP_A, function(co) {
+  sub <- df_A %>% filter(county == co, !is.na(`2025`), !is.na(voters), voters > 0)
+  ct  <- cor.test(sub$voters, sub$`2025`)
+  tibble(
+    County    = co,
+    `r`       = round(ct$estimate, 4),
+    `p-value` = round(ct$p.value, 4),
+    Strength  = case_when(
+      abs(ct$estimate) >= 0.6 ~ "Strong",
+      abs(ct$estimate) >= 0.3 ~ "Moderate",
+      TRUE                    ~ "Weak"))}) %>%
+  kbl(align = c("l", "r", "r", "l")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+# Group B: Central: Murang'a, Kiambu & Kirinyaga
+
+The three Central region counties in this group Murang'a, Kiambu, and Kirinyaga occupy the fertile slopes and foothills of Mount Kenya, one of Kenya's most agriculturally productive zones. Together they form part of what is historically known as the Central Province, sharing cultural and economic ties while exhibiting distinct development profiles.
+
+**Kiambu** is the most urbanized of the three, benefiting from its immediate adjacency to Nairobi. Large portions of Kiambu have been absorbed into the Nairobi metropolitan area, making it one of Kenya's fastest-growing counties with a dynamic mix of residential development, manufacturing, and trade. Its proximity to the capital also means it competes with Nairobi's infrastructure for workers and services, creating a unique development context. With 12 constituencies, Kiambu is also the largest county in the group by constituency count, which naturally drives its higher absolute allocation totals.
+
+**Murang'a** sits to the north of Kiambu and is primarily characterized by smallholder tea and coffee farming, along with significant horticultural production. It has 10 constituencies and has historically been one of the more agricultural and rural counties in the Central belt, though it is increasingly connected to Nairobi's economic sphere.
+
+**Kirinyaga** is the smallest of the three by constituency count (7), located in the rice-growing Mwea plains and the coffee and tea highlands of the Mount Kenya slopes. Mwea is one of East Africa's most productive irrigated rice-farming areas, and Kirinyaga's agricultural identity strongly shapes its development needs and priorities.
+
+## Allocation Trends and Forecasts
+
+As with Group A, the allocation trend chart for Group B reveals the trajectory of NGCDF funding across the three counties from 2014 to 2026, with linear projections extending to 2030. Because Kiambu has significantly more constituencies than Murang'a and Kirinyaga, its county total will naturally be higher — this is expected and not a sign of preferential treatment. The per-voter and per-constituency metrics presented later in this section provide the fairer comparison.
+
+Look for divergences or convergences in the trend lines over time. If Kirinyaga's slope is steeper than Kiambu's, the smaller county may be closing the per-constituency funding gap. Conversely, if the three trends are roughly parallel, it suggests the allocation formula is applying a consistent multiplier across all three counties year on year.
+
+```{r}
+#| label: fig-trend-b
+#| fig-cap: "Group B: Annual NGCDF county totals (actuals 2014–2026) and linear forecast 2027–2030."
+trend_B <- cy_B %>% select(county, year, total) %>% mutate(type = "Actual") %>% bind_rows(fc_B)
+ggplot(trend_B, aes(x = year, y = total / 1e9,
+                    colour = county,
+                    linetype = type,
+                    group = interaction(county, type))) +
+  geom_vline(xintercept = 2026.5, colour = "#94a3b8", linetype = "dashed", linewidth = 0.6) +
+  geom_line(linewidth = 1.5) +
+  geom_point(data = ~ filter(.x, type == "Actual"),
+             size = 2.5, shape = 21, fill = "white", stroke = 2) +
+  geom_point(data = ~ filter(.x, type == "Forecast"),
+             size = 3, shape = 17) +
+  annotate("text", x = 2027.3, y = max(trend_B$total / 1e9) * 0.55,
+           label = "Forecast →", colour = "#6366f1", size = 3.2, fontface = "italic") +
+  scale_colour_manual(values = COL) +
+  scale_linetype_manual(values = c("Actual" = "solid", "Forecast" = "dashed")) +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026, 2027, 2030)) +
+  scale_y_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(
+    title    = "Group B: NGCDF County Totals — Actuals + Forecast 2027–2030",
+    subtitle = "Linear trend fitted on 2020–2026 trajectory",
+    x = NULL, y = "Total (KES Billion)", colour = NULL, linetype = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+```
+
+```{r}
+#| label: tbl-fc-b
+#| tbl-cap: "Group B — Projected NGCDF allocations 2027–2030 (KES, rounded)"
+fc_B %>%
+  mutate(total = round(total)) %>%
+  pivot_wider(names_from = county, values_from = total, id_cols = year) %>%
+  rename(Year = year) %>%
+  mutate(across(-Year, ~ format(.x, big.mark = ","))) %>%
+  kbl(align = c("l", rep("r", 3))) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  add_header_above(c(" " = 1, "Projected Allocation (KES)" = 3))
+```
+
+## Constituency Performance Tiers (2025)
+
+As with Group A, the tier analysis for Group B classifies each constituency into High, Mid, or Low tiers based on where its 2025 allocation falls within the county's own textile distribution. This is a purely relative classification as it identifies which constituencies within each county are relatively well-funded and which are relatively under-funded compared to their county peers.
+
+For Kiambu in particular, the tier analysis is especially informative because its 12 constituencies create a wider spread of possible allocation outcomes than in smaller counties. A significant gap between the High and Low tier constituencies in Kiambu could reflect the urban-rural divide within the county. Urban constituencies near Nairobi may attract different types of projects with different cost profiles compared to constituencies in the rural north of the county.
+
+```{r}
+#| label: fig-tier-b
+#| fig-cap: "Group B — Constituency-level 2025 allocations by performance tier."
+tier_B %>%
+  ggplot(aes(x = `2025` / 1e6, y = reorder(constituency, `2025`), fill = tier)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = tier), hjust = -0.2, size = 2.8, colour = "#475569") +
+  scale_fill_manual(values = c("High" = "#10b981", "Mid" = "#f59e0b", "Low" = "#ef4444")) +
+  scale_x_continuous(
+    labels = label_number(suffix = "M", prefix = "KES "),
+    expand = expansion(mult = c(0, 0.25))) +
+  facet_wrap(~ county, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Group B: Constituency Performance Tiers — 2025",
+    subtitle = "High = top third · Mid = middle third · Low = bottom third",
+    x = "Allocation (KES Millions)", y = NULL, fill = "Tier") +
+  theme(legend.position = "top")
+```
+
+## Equity and Intra-County Distribution (Gini)
+
+The Central region counties present a particularly interesting equity story. Kiambu's large number of constituencies and its mix of urban and rural areas create conditions for potentially high within-county inequality. If urban constituencies near Nairobi consistently receive more (in absolute terms) than rural ones further north, the Gini coefficient will reflect this structural disparity.
+
+Murang'a and Kirinyaga, being smaller and more homogeneous in their agricultural character, may show lower Gini coefficients though this should not be assumed without examining the data. A persistently high or rising Gini in any of these counties would warrant policy dialogue between the NGCDF Board and the respective CDFCs to understand the drivers and assess whether formula adjustments are needed.
+
+As before, both the Gini coefficient (top panel) and the Coefficient of Variation (bottom panel) are shown. Cross-referencing the two provides a more reliable signal than either metric alone.
+
+```{r}
+#| label: fig-gini-b
+#| fig-cap: "Group B: Gini coefficient and Coefficient of Variation, 2014–2026."
+pE1_B <- gini_B %>%
+  ggplot(aes(x = year, y = gini, colour = county, group = county)) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(breaks = 2014:2026) +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(
+    title    = "Group B: Intra-County Gini — 2014 to 2026",
+    subtitle = "0 = perfectly equal · Higher = more unequal",
+    x = NULL, y = "Gini Coefficient", colour = NULL
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+
+pE2_B <- gini_B %>%
+  ggplot(aes(x = year, y = cv, colour = county, group = county)) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(breaks = 2014:2026) +
+  scale_y_continuous(labels = label_percent(scale = 1)) +
+  labs(
+    title = "Group B: Coefficient of Variation (CV)",
+    x = NULL, y = "CV (%)", colour = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+pE1_B / pE2_B
+```
+
+## CPI-Adjusted (Real) Allocations
+
+Central Kenya, and Kiambu in particular, is subject to a distinct inflationary environment because of its urban proximity to Nairobi. Construction costs, land prices, and labor rates in Kiambu are significantly higher than in most other Kenyan counties. This means that even if Kiambu's CPI-adjusted allocation looks comparable to rural counties, the county's *effective* purchasing power for development projects may be lower because the prices it faces are above the national average CPI.
+
+This is an important caveat to keep in mind when interpreting the CPI-adjusted figures: the national CPI used in this analysis is a single Kenya-wide index and does not capture county-level cost differences. Kiambu's real allocation may therefore be overstated relative to what it can actually procure locally.
+
+For Murang'a and Kirinyaga, the national CPI deflator is likely a more accurate approximation of their cost environment, making their real allocation figures more directly comparable.
+
+```{r}
+#| label: fig-cpi-b
+#| fig-cap: "Group B: Nominal vs CPI-adjusted allocation index, 2014 = 100."
+cpi_B <- cy_B %>%
+  select(county, year, total, real_total) %>%
+  mutate(
+    nominal_idx = total      / total[year == 2014]      * 100,
+    real_idx    = real_total / real_total[year == 2014] * 100,
+    .by = county)
+cpi_B %>%
+  pivot_longer(c(nominal_idx, real_idx), names_to = "type", values_to = "idx") %>%
+  mutate(type = recode(type,
+    "nominal_idx" = "Nominal (current KES)",
+    "real_idx"    = "Real (2014 KES)")) %>%
+  ggplot(aes(x = year, y = idx, colour = county, linetype = type)) +
+  geom_hline(yintercept = 100, colour = "#94a3b8", linetype = "dotted") +
+  geom_line(linewidth = 1.4) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = COL) +
+  scale_linetype_manual(values = c("Nominal (current KES)" = "solid", "Real (2014 KES)" = "dashed")) +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026)) +
+  facet_wrap(~ county, ncol = 3) +
+  labs(
+    title    = "Group B: Nominal vs CPI-Adjusted Allocation Index",
+    subtitle = "Base 2014 = 100",
+    x = NULL, y = "Index (2014 = 100)", colour = NULL, linetype = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+```
+
+## Per-Voter Allocation and Voter Context
+
+For the Central region counties, per-voter analysis is particularly revealing because voter registration rates and constituency sizes vary quite markedly. Kiambu has rapidly growing voter rolls driven by urbanization and population in-migration from Nairobi's expanding footprint, which could suppress per-voter allocations even as absolute totals grow. Kirinyaga, with fewer and generally smaller constituencies, may show higher per-voter allocations for some of its constituencies despite receiving a smaller county total.
+
+The scatter plot for 2025 is therefore especially important for this group as it allows a direct visual test of whether the NGCDF allocation formula is compensating (however imperfectly) for constituency size differences, or whether some constituencies are systematically over- or under-funded relative to their voter populations.
+
+```{r}
+#| label: fig-voter-b
+#| fig-cap: "Group B: Per-registered-voter allocation trends and scatter of 2025 allocation vs voter population."
+pV1_B <- cy_B %>%
+  ggplot(aes(x = year, y = per_voter, colour = county, group = county)) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 3, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(breaks = 2014:2026) +
+  scale_y_continuous(labels = label_number(big.mark = ",", prefix = "KES ")) +
+  labs(
+    title = "Group B: Allocation Per Registered Voter 2014 to 2026",
+    x = NULL, y = "KES per Voter", colour = NULL
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+
+pV2_B <- df_B %>%
+  filter(!is.na(`2025`), !is.na(voters), voters > 0) %>%
+  ggplot(aes(x = voters / 1000, y = `2025` / 1e6, colour = county, label = constituency)) +
+  geom_smooth(aes(group = 1), method = "lm", colour = "#64748b",
+              se = TRUE, fill = "#cbd5e1", alpha = 0.3, linewidth = 1) +
+  geom_point(size = 4, alpha = 0.85) +
+  geom_text(size = 2.8, colour = "#475569", vjust = -1, check_overlap = TRUE) +
+  scale_colour_manual(values = COL) +
+  scale_x_continuous(labels = label_number(suffix = "K")) +
+  scale_y_continuous(labels = label_number(suffix = "M", prefix = "KES ")) +
+  labs(
+    title = "Group B: Allocation vs Voter Population — 2025",
+    x = "Registered Voters (Thousands)", y = "Allocation (KES Millions)", colour = NULL) +
+  theme(legend.position = "top")
+pV1_B / pV2_B
+```
+
+## National Ranking (2025)
+
+In the national context, the Central region counties occupy a distinctive position. Kiambu, with its 12 constituencies and high urbanization, would be expected to rank among the top counties by absolute allocation total. Murang'a and Kirinyaga, being smaller, will rank lower but comparing their per-constituency averages to counties of similar size nationally is the more meaningful benchmark.
+
+The ranking chart places all 47 counties on a single canvas, with Group B counties highlighted. This makes it straightforward to see whether Central region counties are broadly in line with, above, or below counties of comparable size and economic profile. Counties that rank unexpectedly low (given their size) or high (relative to their constituency count) may reflect structural features of the allocation formula worth examining.
+
+```{r}
+#| label: fig-rank-b
+#| fig-cap: "Group B: All 47 counties ranked by 2025 NGCDF allocation; Group B counties highlighted."
+#| fig-height: 9
+rank_B %>%
+  mutate(
+    county    = fct_reorder(county, total_2025),
+    highlight = if_else(county %in% GROUP_B, as.character(county), "Other")
+  ) %>%
+  ggplot(aes(x = total_2025 / 1e9, y = county, fill = highlight, alpha = highlight)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = c(COL[GROUP_B], Other = "#cbd5e1")) +
+  scale_alpha_manual(values = c(setNames(rep(1, 3), GROUP_B), Other = 0.5)) +
+  scale_x_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(
+    title    = "Group B: All 47 Counties — 2025 NGCDF Ranking",
+    subtitle = "Group B counties highlighted",
+    x = "Total Allocation (KES Billion)", y = NULL) +
+  guides(fill = guide_legend(title = NULL), alpha = "none") +
+  theme(legend.position = "top", axis.text.y = element_text(size = 8.5))
+```
+
+```{r}
+#| label: tbl-rank-b
+#| tbl-cap: "Group B: National ranking positions for Murang'a, Kiambu, and Kirinyaga (2025)"
+rank_B %>%
+  filter(is_target) %>%
+  select(
+    County = county, Rank = rank,
+    `Total 2025 (KES)` = total_2025,
+    `No. Constituencies` = n_const,
+    `Avg per Const. (KES)` = avg_per_const) %>%
+  mutate(
+    `Total 2025 (KES)`     = format(round(`Total 2025 (KES)`), big.mark = ","),
+    `Avg per Const. (KES)` = format(round(`Avg per Const. (KES)`), big.mark = ",")) %>%
+  kbl(align = c("l", "c", "r", "c", "r")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+## Comparison with Neighboring Counties
+
+For the Central counties, the selected neighbors are: **Nyandarua, Embu, Machakos, Nairobi, and Nyeri**. This peer group is deliberately diverse as it includes Nairobi, a clear outlier in terms of economic size and constituency count, as well as smaller counties like Embu and Nyandarua that are more comparable to Kirinyaga and Murang'a respectively.
+
+Including Nairobi is instructive precisely because of its outlier status: it illustrates how the NGCDF formula functions at the extreme end of constituency scale, and it contextualizes whether the Central counties are securing allocations proportionate to their relative development needs and constituency sizes. Nyeri provides a good Mount Kenya region benchmark, sharing similar agricultural and demographic characteristics with Murang'a and Kirinyaga.
+
+As before, target counties are shown with solid, bold lines and neighboring counties with dashed, lighter lines in the trend chart, making it straightforward to track relative trajectories over the full 2014–2026 period.
+
+```{r}
+#| label: fig-neighbours-b
+#| fig-cap: "Group B: 2025 allocations and allocation trends for target and neighbouring counties."
+SHOW_B <- c(GROUP_B, NEIGHBOURS_B)
+
+nb_yr_B <- df_all %>%
+  filter(county %in% SHOW_B) %>%
+  pivot_longer(all_of(YEARS), names_to = "year", values_to = "alloc") %>%
+  mutate(year = as.integer(year)) %>%
+  filter(!is.na(alloc)) %>%
+  group_by(county, year) %>%
+  summarise(total = sum(alloc), n = n(), .groups = "drop")
+pN1_B <- nb_yr_B %>%
+  filter(year == 2025) %>%
+  arrange(desc(total)) %>%
+  mutate(county = fct_inorder(county),
+         type   = ifelse(county %in% GROUP_B, "Target", "Neighbour")) %>%
+  ggplot(aes(x = total / 1e9, y = county, fill = county, alpha = type)) +
+  geom_col(width = 0.75, show.legend = FALSE) +
+  geom_text(aes(label = paste0(round(total / 1e9, 2), "B")),
+            hjust = -0.15, size = 3, colour = "#475569") +
+  scale_fill_manual(values = COL) +
+  scale_alpha_manual(values = c("Target" = 1, "Neighbour" = 0.55)) +
+  scale_x_continuous(
+    labels = label_number(suffix = "B", prefix = "KES "),
+    expand = expansion(mult = c(0, 0.25))) +
+  labs(title = "2025 Allocation: Target vs Neighbours",
+       x = "Total (KES Billion)", y = NULL)
+pN2_B <- nb_yr_B %>%
+  mutate(type = ifelse(county %in% GROUP_B, "Target", "Neighbour")) %>%
+  ggplot(aes(x = year, y = total / 1e9, colour = county, group = county,
+             linewidth = type, linetype = type)) +
+  geom_line() +
+  geom_point(data = ~ filter(.x, type == "Target"), size = 2.5) +
+  scale_colour_manual(values = COL) +
+  scale_linewidth_manual(values = c("Target" = 2, "Neighbour" = 1), guide = "none") +
+  scale_linetype_manual(values = c("Target" = "solid", "Neighbour" = "dashed"), guide = "none") +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026)) +
+  scale_y_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(title = "Allocation Trends — Target + Neighbours",
+       x = NULL, y = "Total (KES Billion)", colour = NULL) +
+  theme(legend.position = "top")
+pN1_B | pN2_B
+```
+
+## Statistical Tests
+
+The same battery of statistical tests applied to Group A is now applied to the Central counties. For Group B, the results may differ in important ways from Group A because the constituency landscape is different as Kiambu's 12 constituencies create more data points for within-county analysis, while Kirinyaga's 7 constituencies mean tests for that county have lower statistical power (a smaller sample is less able to detect true differences).
+
+Keep this in mind when interpreting p-values: a non-significant result in Kirinyaga should not be taken as evidence of equality, but rather as a consequence of limited data. The Kruskal-Wallis test is particularly valuable here as it is robust to unequal sample sizes across groups.
+
+The correlation between voter count and allocation is also worth monitoring closely for Kiambu, given the county's rapidly changing voter landscape. If the correlation is weak or negative for Kiambu, it would suggest that the formula is not fully capturing constituency population dynamics in this urbanizing environment.
+
+```{r}
+#| label: tbl-anova-b
+#| tbl-cap: "Group B — ANOVA and Kruskal-Wallis tests on 2025 constituency allocations"
+anova_df_B <- df_B %>% filter(!is.na(`2025`)) %>% mutate(county = factor(county))
+aov_B <- aov(`2025` ~ county, data = anova_df_B)
+kw_B  <- kruskal.test(`2025` ~ county, data = anova_df_B)
+
+aov_sum_B <- summary(aov_B)[[1]]
+
+tibble(
+  Test      = c("One-way ANOVA", "Kruskal-Wallis"),
+  Statistic = c(round(aov_sum_B$`F value`[1], 3), round(kw_B$statistic, 3)),
+  df        = c(paste0(aov_sum_B$Df[1], ", ", aov_sum_B$Df[2]), kw_B$parameter),
+  `p-value` = c(round(aov_sum_B$`Pr(>F)`[1], 4), round(kw_B$p.value, 4)),
+  Conclusion = c(
+    ifelse(aov_sum_B$`Pr(>F)`[1] < 0.05, "Significant difference", "No significant difference"),
+    ifelse(kw_B$p.value < 0.05, "Significant difference", "No significant difference")
+  )
+) %>%
+  kbl(align = c("l", "r", "c", "r", "l")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+```{r}
+#| label: tbl-ttest-b
+#| tbl-cap: "Group B: Paired t-tests: 2024 vs 2025 allocation per constituency"
+map_dfr(GROUP_B, function(co) {
+  sub <- df_B %>% filter(county == co, !is.na(`2024`), !is.na(`2025`))
+  tt  <- t.test(sub$`2025`, sub$`2024`, paired = TRUE)
+  tibble(
+    County            = co,
+    `t-statistic`     = round(tt$statistic, 3),
+    `Mean Diff (KES)` = format(round(tt$estimate), big.mark = ","),
+    `p-value`         = round(tt$p.value, 4),
+    Significance      = ifelse(tt$p.value < 0.05, "Significant ✓", "Not Significant"))}) %>%
+  kbl(align = c("l", "r", "r", "r", "l")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+```{r}
+#| label: tbl-corr-b
+#| tbl-cap: "Group B: Pearson correlation between registered voters and 2025 allocation"
+map_dfr(GROUP_B, function(co) {
+  sub <- df_B %>% filter(county == co, !is.na(`2025`), !is.na(voters), voters > 0)
+  ct  <- cor.test(sub$voters, sub$`2025`)
+  tibble(
+    County    = co,
+    `r`       = round(ct$estimate, 4),
+    `p-value` = round(ct$p.value, 4),
+    Strength  = case_when(
+      abs(ct$estimate) >= 0.6 ~ "Strong",
+      abs(ct$estimate) >= 0.3 ~ "Moderate",
+      TRUE                    ~ "Weak"))}) %>%
+  kbl(align = c("l", "r", "r", "l")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+# Cross-Group Comparison: All Six Counties
+
+Having examined each regional group in detail, this section brings all six counties together for a direct cross-group comparison. This is where the analysis moves from describing individual county trajectories to identifying broader patterns about how Rift Valley and Central region counties compare in terms of NGCDF allocations, growth rates, and equity.
+
+The two groups occupy different places in Kenya's development geography. The Rift Valley counties (Group A) are predominantly agricultural, with significant food-production significance at the national level, and are served by a more rural constituency structure. The Central counties (Group B) are more economically diverse, with stronger links to Nairobi's economic core and higher urbanization rates in Kiambu.
+
+Despite these differences, both groups receive NGCDF funds through the same national formula, making cross-group comparison both legitimate and insightful. If one group is consistently receiving more per constituency or per voter, it raises questions about whether the formula is working equitably across Kenya's diverse county contexts.
+
+## Allocation Trends 2014–2026
+
+The combined trend chart places all six counties on a single canvas. Solid lines represent Rift Valley (Group A) counties; dashed lines represent Central (Group B) counties. This visual convention makes it easy to see whether one group as a whole has been growing faster than the other, or whether the trajectories have been broadly similar.
+
+Pay attention to any "crossovers" points where a Group A county's line intersects with a Group B county's line. These signal a shift in relative allocation standing and may reflect changes in the voter registration base, constituency redistricting, or shifts in the national formula.
+
+Also note the **spread within each group**: if Group B counties are more dispersed (wider gap between the highest and lowest lines in the group) than Group A, it suggests greater within-group heterogeneity in Central Kenya's NGCDF receipts largely a reflection of Kiambu's dominant size relative to Murang'a and Kirinyaga.
+
+```{r}
+#| label: fig-all6-trend
+#| fig-cap: "All six target counties, NGCDF allocation trends 2014–2026. Solid lines = Group A (Rift Valley); dashed lines = Group B (Central)."
+cy_6 %>%
+  ggplot(aes(x = year, y = total / 1e9, colour = county, group = county,
+             linetype = ifelse(county %in% GROUP_A, "Group A", "Group B"))) +
+  geom_line(linewidth = 1.6) +
+  geom_point(size = 2.5, shape = 21, fill = "white", stroke = 2) +
+  scale_colour_manual(values = COL) +
+  scale_linetype_manual(values = c("Group A" = "solid", "Group B" = "dashed"),
+                        name = "Group") +
+  scale_x_continuous(breaks = c(2014, 2017, 2020, 2023, 2026)) +
+  scale_y_continuous(labels = label_number(suffix = "B", prefix = "KES ")) +
+  labs(
+    title    = "All 6 Target Counties — Allocation Trends 2014–2026",
+    subtitle = "Solid = Rift Valley (Group A) · Dashed = Central (Group B)",
+    x = NULL, y = "Total (KES Billion)", colour = NULL
+  ) +
+  theme(legend.position = "top")
+```
+
+## 2025 Allocation Side-by-Side
+
+The 2025 allocation comparison, faceted by group, provides the clearest snapshot of where each county stands at the most recent point in the data series. Within each group, counties are sorted from lowest to highest allocation, with exact values labelled.
+
+A few things are worth examining closely here. First, how does the within-group spread compare between Group A and Group B? A tighter spread (counties closer together in allocation level) suggests more uniform development investment within the group. A wider spread, especially if one county significantly dominates, points to structural differences (typically constituency count) that absolute totals cannot overcome.
+
+Second, how do the highest-ranked Group A county and the lowest-ranked Group B county compare? If there is significant overlap between the groups' allocation ranges, it suggests the two groups are broadly in the same tier of national NGCDF receipts. If Group B counties uniformly exceed Group A, it signals a structural advantage, most likely Kiambu's out-sized constituency count.
+
+The scorecard table that follows this chart brings together the key metrics, 2014 and 2025 allocations, nominal growth, national rank, and Gini coefficient into a single consolidated view for all six counties, enabling a comprehensive side-by-side assessment.
+
+```{r}
+#| label: fig-all6-2025
+#| fig-cap: "All six target counties — 2025 NGCDF allocations faceted by regional group."
+cy_6 %>%
+  filter(year == 2025) %>%
+  mutate(
+    county = fct_reorder(county, total),
+    group  = ifelse(county %in% GROUP_A, "Rift Valley (Group A)", "Central (Group B)")
+  ) %>%
+  ggplot(aes(x = total / 1e9, y = county, fill = county)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = paste0("KES ", round(total / 1e9, 2), "B")),
+            hjust = -0.1, size = 3.2, colour = "#475569") +
+  scale_fill_manual(values = COL) +
+  scale_x_continuous(
+    labels = label_number(suffix = "B", prefix = "KES "),
+    expand = expansion(mult = c(0, 0.3))
+  ) +
+  facet_wrap(~ group, scales = "free_y", ncol = 1) +
+  labs(
+    title = "2025 Allocation — All 6 Counties by Group",
+    x = "Total Allocation (KES Billion)", y = NULL
+  ) +
+  theme(legend.position = "none")
+```
+
+## Summary Scorecard
+
+The scorecard below is the single most compact summary of the entire analysis. Each row represents one county, and together the columns capture the most important dimensions of NGCDF performance:
+
+- **2014 and 2025 Allocations (KES):** The starting and ending points of the nominal allocation series, showing the absolute scale of funding each county receives.
+- **Growth (%):** The nominal percentage increase from 2014 to 2025. This is the headline growth figure, but remember that it includes the effect of inflation — compare with the CPI-adjusted analysis in earlier sections for a clearer picture of real growth.
+- **National Rank (2025):** How the county sits within the full landscape of all 47 Kenyan counties by total NGCDF allocation. A lower rank number means more funding.
+- **Gini (2025):** The within-county inequality of constituency allocations in the most recent year. Lower values indicate a more equitable distribution; higher values indicate greater concentration among a subset of constituencies.
+
+Reading across any single row gives a quick profile of that county: how big is its NGCDF envelope, how fast has it grown, where does it stand nationally, and how equitably are its constituencies served?
+
+```{r}
+#| label: tbl-scorecard
+#| tbl-cap: "All six target counties key metrics scorecard (2025)"
+# Combine ranking data
+rank_all <- bind_rows(rank_A, rank_B) %>% distinct(county, .keep_all = TRUE)
+gini_all <- bind_rows(gini_A, gini_B)
+
+scorecard <- cy_6 %>%
+  filter(year %in% c(2014, 2025)) %>%
+  select(county, year, total) %>%
+  pivot_wider(names_from = year, values_from = total, names_prefix = "y") %>%
+  mutate(growth_pct = round((y2025 / y2014 - 1) * 100, 1)) %>%
+  left_join(rank_all %>% select(county, rank), by = "county") %>%
+  left_join(gini_all %>% filter(year == 2025) %>% select(county, gini), by = "county") %>%
+  mutate(
+    group = ifelse(county %in% GROUP_A, "Rift Valley", "Central"),
+    y2014 = format(round(y2014), big.mark = ","),
+    y2025 = format(round(y2025), big.mark = ","),
+    gini  = round(gini, 4)
+  ) %>%
+  arrange(rank) %>%
+  select(
+    Group  = group,
+    County = county,
+    `2014 Allocation (KES)` = y2014,
+    `2025 Allocation (KES)` = y2025,
+    `Growth (%)`      = growth_pct,
+    `Nat. Rank (2025)` = rank,
+    `Gini (2025)`     = gini)
+scorecard %>%
+  kbl(align = c("l", "l", "r", "r", "r", "c", "r")) %>%
+  kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover")) %>%
+  pack_rows("Rift Valley — Group A", 1, 3) %>%
+  pack_rows("Central — Group B", 4, 6)
+```
+
+# Methodology
+
+## Data Sources
+
+The analysis is based on official NGCDF constituency allocation data for the period 2014–2026, sourced from the **NGCDF Board** [@ngcdf2025]. The data set covers all parliamentary constituencies within the six study counties, with annual allocation figures recorded for each financial year. Voter registration figures used for per-voter computations are drawn from the **Independent Electoral and Boundaries Commission (IEBC)** registered voter rolls [@iebc2022].
+
+### Data Cleaning and Preparation
+
+The raw data set underwent the following cleaning steps before analysis:
+
+1. **Column name standardization:** Year columns originally prefixed with `X` (e.g., `X2014`) were stripped of the prefix and converted to plain integer year labels.
+2. **County name normalization:** The county name "Murang'a" appears in multiple forms in the raw data (with and without the apostrophe, and with varying capitalization). All variants were harmonized to the standard form `Murang'a` using a case-insensitive pattern match.
+3. **Numeric conversion:** All allocation and voter columns were coerced to numeric type, with warnings suppressed for non-numeric values that were treated as missing (`NA`).
+4. **Missing data handling:** Rows with missing county or constituency identifiers were excluded. Year-constituency combinations with missing allocation values were excluded from aggregations for those specific years but did not cause the constituency to be dropped from all analyses.
+
+### Limitations of the Data
+
+- The CPI index used is a national Kenya-wide measure and does not capture county-level price differences, which are particularly relevant for Kiambu given its proximity to Nairobi.
+- Voter registration figures represent registered voters at a point in time and may not perfectly match the population of each constituency, particularly in rapidly urbanizing areas where migration and registration patterns may be out of sync.
+- The analysis covers the period up to 2026; figures for 2026 may in some cases be preliminary or estimated depending on the data extraction date.
+
+## CPI Adjustment
+
+All CPI adjustments use Kenya's **Consumer Price Index** [@knbs2025] with 2014 as the base year (index = 100). The deflator series (table below) allows nominal allocations to be converted to constant 2014 Kenya Shillings, enabling meaningful inter-temporal comparisons of purchasing power.
+
+### Why Inflation Adjustment Matters
+
+Without CPI adjustment, comparing a 2025 allocation to a 2014 allocation in raw KES terms is like comparing apples to oranges the 2025 shilling is worth significantly less than the 2014 shilling. Kenya experienced cumulative inflation of approximately 77% between 2014 and 2025, meaning that KES 100 in 2025 buys roughly the same as KES 56 did in 2014.
+
+For NGCDF analysis, this matters in two ways. First, it affects the real value of allocations. A constituency whose allocation grew 50% nominally over the period actually received less in real terms than it did at the start, because inflation outpaced its funding growth. Second, it affects the design and cost of development projects: a school classroom or borehole that cost KES 2 million to build in 2014 may cost KES 3.5 million or more today, meaning a constituency needs its allocation to grow significantly just to maintain the same construction output.
+
+The CPI series used in this report is reproduced below, along with the implied annual inflation rate, for full transparency.
+
+```{r}
+#| label: tbl-cpi
+#| tbl-cap: "Kenya CPI deflator series used in this analysis (2014 = 100)"
+CPI_DF %>%
+  mutate(pct_change = round((cpi / lag(cpi) - 1) * 100, 1)) %>%
+  rename(Year = year, `CPI Index` = cpi, `Annual Inflation (%)` = pct_change) %>%
+  kbl(align = c("c", "r", "r")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+## Forecasting Approach
+
+County-level forecasts for 2027–2030 are generated using **ordinary least squares (OLS) linear regression**, with the 2020–2026 period as the estimation window to capture post-COVID-19 fiscal trajectory. The model form is:
+
+$$
+\text{Total Allocation}_t = \beta_0 + \beta_1 \cdot t + \varepsilon_t
+$$
+
+Forecast confidence intervals are not reported given the exploratory nature of the projections and the short estimation window. Projections should be interpreted as **indicative rather than predictive**.
+
+## Equity Metrics
+
+Two complementary measures of intra-county distributional equity are reported:
+
+- **Gini Coefficient:** Ranges from 0 (perfect equality) to 1 (maximum inequality). Computed annually for each county using constituency-level allocation data via the `ineq` package.
+- **Coefficient of Variation (CV):** Standard deviation expressed as a percentage of the mean. Provides a scale-invariant measure of relative dispersion.
+
+## Statistical Tests
+
+- **One-way ANOVA:** Tests whether mean 2025 constituency allocations differ significantly across the counties within each group.
+- **Kruskal-Wallis test:** Non-parametric equivalent of ANOVA; used to corroborate findings where normality may be violated.
+- **Paired t-test (2024 vs 2025):** Tests whether the mean constituency allocation changed significantly between the two most recent years.
+- **Pearson correlation:** Measures the linear association between registered voter count and 2025 allocation at the constituency level.
+
+# Conclusions
+
+This analysis reveals several important patterns in NGCDF allocations across the six study counties:
+
+**Allocation growth has been broadly positive** across all six counties over the 2014–2026 period in nominal terms. However, after adjusting for inflation, real growth has been considerably more modest — reflecting a Kenya CPI increase of approximately 77% over the same period.
+
+**Intra-county equity varies.** Gini coefficients and CVs indicate that some counties distribute allocations more equitably across constituencies than others. Monitoring these metrics over time can flag emerging disparities that may warrant policy attention.
+
+**Per-voter allocations** provide a fairer basis for cross-constituency comparison than absolute totals, particularly where voter populations differ substantially. Constituencies with smaller voter rolls may receive higher per-voter funding even when their absolute allocation is lower.
+
+**National rankings** contextualize the study counties against all 47 Kenyan counties and highlight where each county sits in the national distribution.
+
+**Forecasts** suggest continued nominal growth through 2030, though the pace of growth will depend on national budget decisions and economic conditions.
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+# Appendix — R Session Information
+
+```{r}
+#| echo: false
+sessionInfo()
+```
